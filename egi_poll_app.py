@@ -1944,7 +1944,7 @@ def build_start_question_chart(
         fig.update_layout(height=60, paper_bgcolor=SAP_WHITE, plot_bgcolor=SAP_WHITE)
         return fig
 
-    agg["pct"]  = (agg["Count"] / total * 100).round(1)
+    agg["pct"]  = (agg["Count"] / total * 100).round(0).astype(int)
     answers     = list(agg["Answer"])
     ans_counts  = dict(zip(agg["Answer"], agg["Count"]))
     q_type      = _detect_start_question_type(question, answers)
@@ -1960,7 +1960,7 @@ def build_start_question_chart(
         y_labels.append(_wrap_label(ans, 42))
         x_vals.append(pct)
         counts.append(cnt)
-        hovers.append(f"<b>{ans}</b><br>{pct:.1f}% of respondents<br>{cnt} response(s)")
+        hovers.append(f"<b>{ans}</b><br>{pct:.0f}% of respondents<br>{cnt} response(s)")
 
     n_bars   = len(y_labels)
     colors   = [_SP_BAR_COLORS[i % len(_SP_BAR_COLORS)] for i in range(n_bars)]
@@ -2049,7 +2049,7 @@ def generate_start_poll_insights(tidy: pd.DataFrame) -> list:
         total = int(agg["Count"].sum())
         if total == 0:
             continue
-        agg["pct"] = (agg["Count"] / total * 100).round(1)
+        agg["pct"] = (agg["Count"] / total * 100).round(0).astype(int)
 
         answers   = list(agg["Answer"])
         q_type    = _detect_start_question_type(question, answers)
@@ -2679,19 +2679,19 @@ def compute_zoom_metrics(tidy: pd.DataFrame, score_map: dict,
         agg["Pct"]   = (agg["Count"] / total * 100).round(1)
 
         mean_score = (agg["Score"] * agg["Count"]).sum() / total
-        score_norm = round((mean_score - 1) / 4 * 100, 1)
+        score_norm = round((mean_score - 1) / 4 * 100)
 
         fav_pct   = float(agg.loc[agg["Score"] >= fav_threshold,   "Pct"].sum())
         unfav_pct = float(agg.loc[agg["Score"] <= unfav_threshold, "Pct"].sum())
-        neut_pct  = max(round(100 - fav_pct - unfav_pct, 1), 0)
+        neut_pct  = max(round(100 - fav_pct - unfav_pct), 0)
         top_ans   = agg.loc[agg["Count"].idxmax(), "Answer"]
 
         per_question[q] = {
             "mean"       : round(mean_score, 2),
             "score_norm" : score_norm,
-            "fav_pct"    : round(fav_pct, 1),
-            "neut_pct"   : round(neut_pct, 1),
-            "unfav_pct"  : round(unfav_pct, 1),
+            "fav_pct"    : round(fav_pct),
+            "neut_pct"   : round(neut_pct),
+            "unfav_pct"  : round(unfav_pct),
             "top_answer" : top_ans,
             "total"      : int(total),
         }
@@ -2700,8 +2700,8 @@ def compute_zoom_metrics(tidy: pd.DataFrame, score_map: dict,
         return {}
 
     sorted_q    = sorted(per_question.items(), key=lambda x: x[1]["score_norm"], reverse=True)
-    overall     = round(np.mean([v["score_norm"] for v in per_question.values()]), 1)
-    overall_fav = round(np.mean([v["fav_pct"]    for v in per_question.values()]), 1)
+    overall     = round(np.mean([v["score_norm"] for v in per_question.values()]))
+    overall_fav = round(np.mean([v["fav_pct"]    for v in per_question.values()]))
 
     return {
         "per_question"    : per_question,
@@ -2818,7 +2818,7 @@ def build_zoom_score_chart(per_question: dict) -> go.Figure:
         customdata=list(zip(questions, totals, fav_pcts)),
         hovertemplate=(
             "<b>%{customdata[0]}</b><br>"
-            "Score: <b>%{x:.1f}%</b><br>"
+            "Score: <b>%{x:.0f}%</b><br>"
             "Respondents: <b>%{customdata[1]}</b><br>"
             "Positive: <b>%{customdata[2]}%</b>"
             "<extra></extra>"
@@ -2933,8 +2933,8 @@ def build_response_composition_chart(tidy: pd.DataFrame, score_map: dict) -> go.
                 if total > 0:
                     p = cnt / total * 100
                     pct += p
-                    labels.append(f"{ans[:25]}: {p:.1f}%")
-            x_vals.append(round(pct, 1))
+                    labels.append(f"{ans[:25]}: {p:.0f}%")
+            x_vals.append(round(pct))
             hover_texts.append("<br>".join(labels) if labels else f"(no responses at score {score})")
         fig.add_trace(go.Bar(
             name=SCORE_LABELS[score],
@@ -3346,9 +3346,9 @@ def generate_zoom_insights(zm: dict, tidy: pd.DataFrame, score_map: dict) -> lis
 
     if val_qs or rel_qs or impl_qs:
         # Aggregate positive rates for each dimension
-        val_fav  = round(np.mean([v["fav_pct"] for v in val_qs.values()]),  1) if val_qs  else None
-        rel_fav  = round(np.mean([v["fav_pct"] for v in rel_qs.values()]),  1) if rel_qs  else None
-        impl_fav = round(np.mean([v["fav_pct"] for v in impl_qs.values()]), 1) if impl_qs else None
+        val_fav  = round(np.mean([v["fav_pct"] for v in val_qs.values()]))  if val_qs  else None
+        rel_fav  = round(np.mean([v["fav_pct"] for v in rel_qs.values()]))  if rel_qs  else None
+        impl_fav = round(np.mean([v["fav_pct"] for v in impl_qs.values()])) if impl_qs else None
 
         # Build a narrative sentence for each available dimension
         signals = []
@@ -3621,7 +3621,8 @@ def export_zoom_excel(tidy: pd.DataFrame, zm: dict, score_map: dict) -> bytes:
 
 def generate_pptx_bytes(tidy: pd.DataFrame, zm: dict, score_map: dict,
                         source_filename: str = "",
-                        egi_name: str = "") -> bytes:
+                        egi_name: str = "",
+                        n_egis: int = 0) -> bytes:
     """
     3-slide SAP-branded PPTX for EGI Closing Poll:
       1 — Cover  (deep-navy, EGI name, key metrics panel, SAP logo)
@@ -3697,9 +3698,9 @@ def generate_pptx_bytes(tidy: pd.DataFrame, zm: dict, score_map: dict,
     _egi_display = egi_name if egi_name else "SAP EGI Session"
 
     _q01_key = next((q for q in pq if _re.search(r"(satisf|overall|q01)", q, _re.I)), None)
-    _q01_fav = round(pq[_q01_key]["fav_pct"], 1) if _q01_key else None
+    _q01_fav = round(pq[_q01_key]["fav_pct"]) if _q01_key else None
     _q03_key = next((q for q in pq if _re.search(r"(likely|implement|q03)", q, _re.I)), None)
-    _q03_fav = round(pq[_q03_key]["fav_pct"], 1) if _q03_key else None
+    _q03_fav = round(pq[_q03_key]["fav_pct"]) if _q03_key else None
 
     # ── SAP logo (PNG from SVG) ────────────────────────────────────
     # SAP logo — embedded as base64, zero runtime dependencies
@@ -4131,7 +4132,7 @@ def generate_pptx_bytes(tidy: pd.DataFrame, zm: dict, score_map: dict,
             _tot_p  = int(_agg_p["Count"].sum())
             if _tot_p == 0:
                 continue
-            _agg_p["pct"] = (_agg_p["Count"] / _tot_p * 100).round(1)
+            _agg_p["pct"] = (_agg_p["Count"] / _tot_p * 100).round(0).astype(int)
             _ans_p   = list(_agg_p["Answer"])
             _qt_p    = _detect_start_question_type(_nq_p, _ans_p)
             _ac_p    = dict(zip(_agg_p["Answer"], _agg_p["Count"]))
@@ -4176,22 +4177,41 @@ def generate_pptx_bytes(tidy: pd.DataFrame, zm: dict, score_map: dict,
               0.35, 0.68, 10.6, 0.30, size=8.5, color=C_LIGHT_BLUE)
      add_footer(slide, 2, _total_slides)
 
-     # ── 5 KPI cards (soft palette per card) ────────────────────
-     _kpis = [
-         ("SESSIONS",          str(n_sess),
-          "sessions with poll data",                False),
-         ("TOTAL RESPONDENTS", str(total_resp),
-          f"avg. {avg_resp} / session",             False),
-         ("OVERALL SCORE",     f"{overall}%",
-          f"avg. of {len(pq)} scored questions",    overall < 60),
-         ("SATISFACTION RATE",
-          f"{_q01_fav}%" if _q01_fav is not None else "N/A",
-          "positive responses — Q01",               (_q01_fav or 0) < 60),
-         ("LIKELY TO ACT",
-          f"{_q03_fav}%" if _q03_fav is not None else "N/A",
-          "plan to apply learnings — Q03",          (_q03_fav or 0) < 60),
-     ]
-     _cw = 2.36; _cg = 0.14; _sx = 0.47; _cy = 1.30; _ch = 1.52
+     # ── KPI cards: 6-card layout (consolidated) or 5-card (single EGI) ──
+     if n_egis > 1:
+         _kpis = [
+             ("EGIs",              str(n_egis),
+              "with closing poll data",                False),
+             ("SESSIONS",          str(n_sess),
+              "total sessions analysed",              False),
+             ("TOTAL RESPONDENTS", str(total_resp),
+              f"avg. {avg_resp} / session",            False),
+             ("OVERALL SCORE",     f"{overall}%",
+              f"avg. of {len(pq)} scored questions",   overall < 60),
+             ("SATISFACTION RATE",
+              f"{_q01_fav}%" if _q01_fav is not None else "N/A",
+              "positive responses — Q01",              (_q01_fav or 0) < 60),
+             ("LIKELY TO ACT",
+              f"{_q03_fav}%" if _q03_fav is not None else "N/A",
+              "plan to apply learnings — Q03",         (_q03_fav or 0) < 60),
+         ]
+         _cw = 1.97; _cg = 0.12; _sx = 0.47; _cy = 1.30; _ch = 1.52
+     else:
+         _kpis = [
+             ("SESSIONS",          str(n_sess),
+              "sessions with poll data",               False),
+             ("TOTAL RESPONDENTS", str(total_resp),
+              f"avg. {avg_resp} / session",            False),
+             ("OVERALL SCORE",     f"{overall}%",
+              f"avg. of {len(pq)} scored questions",   overall < 60),
+             ("SATISFACTION RATE",
+              f"{_q01_fav}%" if _q01_fav is not None else "N/A",
+              "positive responses — Q01",              (_q01_fav or 0) < 60),
+             ("LIKELY TO ACT",
+              f"{_q03_fav}%" if _q03_fav is not None else "N/A",
+              "plan to apply learnings — Q03",         (_q03_fav or 0) < 60),
+         ]
+         _cw = 2.36; _cg = 0.14; _sx = 0.47; _cy = 1.30; _ch = 1.52
      for i, (lbl, val, sub, warn) in enumerate(_kpis):
          _cx = _sx + i * (_cw + _cg)
          add_rect(slide, _cx, _cy, _cw, _ch, fill=_SOFT[i % len(_SOFT)])
@@ -4204,46 +4224,82 @@ def generate_pptx_bytes(tidy: pd.DataFrame, zm: dict, score_map: dict,
          add_text(slide, sub, _cx + 0.15, _cy + 1.10, _cw - 0.22, 0.36,
                   size=7, color=C_GRAY_DARK)
 
-     # ── Status bar (below KPI cards) ──────────────────────────
-     _warn_qs = [(q, v) for q, v in pq.items() if v["score_norm"] < 60]
-     if _warn_qs:
-         _status_txt = (f"{len(_warn_qs)} question(s) below 60% target — "
-                        f"review recommended")
-         _status_col = C_DEEP_NAVY
-     else:
-         _status_txt = "All questions meet or exceed the 60% satisfaction target"
-         _status_col = C_DARK_NAVY
-     add_rect(slide, 0.47, 2.96, 12.39, 0.33, fill=_status_col)
-     add_text(slide, _status_txt,
-              0.62, 2.99, 12.10, 0.27, size=8, color=C_WHITE)
+     # ── Two-column Insights & Recommendations table ────────────
+     # Layout constants
+     _T_Y   = 2.90    # table top y (just below KPI cards; no status bar)
+     _T_LX  = 0.47    # left edge x
+     _T_W   = 12.39   # total table width
+     _LC_W  = 7.40    # left column width  (Insight)
+     _SEP_W = 0.09    # separator strip width
+     _RC_X  = _T_LX + _LC_W + _SEP_W   # right column x
+     _RC_W  = _T_W - _LC_W - _SEP_W    # right column width (Recommended Action)
+     _T_YMAX = 6.92
+     _HDR_H  = 0.26   # section header height
+     _CAT_H  = 0.22   # category sub-header height
+     _ROW_H  = 0.58   # data row height
+     _ROW_G  = 0.04   # gap between data rows
 
-     # ── Key Findings (insights) ────────────────────────────────
-     add_rect(slide, 0.47, 3.38, 12.39, 0.28, fill=C_DARK_NAVY)
-     add_text(slide, "KEY FINDINGS",
-              0.62, 3.40, 12.10, 0.24, size=8, bold=True, color=C_WHITE)
+     # Section header row: "INSIGHT" | "RECOMMENDED ACTION"
+     add_rect(slide, _T_LX, _T_Y, _T_W, _HDR_H, fill=C_BLUE)
+     add_text(slide, "INSIGHT",
+              _T_LX + 0.12, _T_Y + 0.05, _LC_W - 0.18, _HDR_H - 0.08,
+              size=7.5, bold=True, color=C_WHITE)
+     add_text(slide, "RECOMMENDED ACTION",
+              _RC_X + 0.10, _T_Y + 0.05, _RC_W - 0.14, _HDR_H - 0.08,
+              size=7.5, bold=True, color=C_WHITE)
+     _T_Y += _HDR_H
 
-     _strengths = _grp.get("Value & Impact", [])
-     _warnings  = _grp.get("Recommendations", [])
-     _findings  = []
-     for _s in _strengths[:2]: _findings.append(("strength", _s))
-     for _w in _warnings[:2]:  _findings.append(("warning",  _w))
-     _findings = _findings[:3]
+     # Category order: Recommendations first, then Value & Impact
+     _tbl_cats = [
+         ("Recommendations", "RECOMMENDATIONS", C_DEEP_NAVY, 2),
+         ("Value & Impact",  "VALUE & IMPACT",  C_DARK_NAVY, 3),
+     ]
 
-     _fy = 3.72
-     _row_h = 1.00
-     for _ftype, _ins in _findings:
-         if _fy + _row_h > 6.95:
+     for _ck, _cl, _cc, _cmax in _tbl_cats:
+         _citems = _grp.get(_ck, [])
+         if not _citems:
+             continue
+         if _T_Y + _CAT_H > _T_YMAX:
              break
-         _accent = C_BLUE if _ftype == "strength" else C_DEEP_NAVY
-         add_rect(slide, 0.47, _fy, 12.39, _row_h, fill=C_SOFT_ROW)
-         add_rect(slide, 0.47, _fy, 0.07,  _row_h, fill=_accent)
-         _title = plain_text(_ins.get("title", ""), 120)
-         _body  = plain_text(_ins.get("text",  ""), 400)
-         add_text(slide, _title, 0.62, _fy + 0.06, 12.10, 0.28,
-                  size=8.5, bold=True, color=C_DEEP_NAVY, wrap=True)
-         add_text(slide, _body,  0.62, _fy + 0.38, 12.10, 0.56,
-                  size=7.5, color=C_DARK_NAVY, wrap=True)
-         _fy += _row_h + 0.07
+
+         # Category sub-header (full width, dark band)
+         add_rect(slide, _T_LX, _T_Y, _T_W, _CAT_H, fill=_cc)
+         _cn_lbl = (f"{_cl}  —  "
+                    f"{len(_citems)} item{'s' if len(_citems) != 1 else ''}")
+         add_text(slide, _cn_lbl,
+                  _T_LX + 0.12, _T_Y + 0.03, _T_W * 0.50, _CAT_H - 0.04,
+                  size=7, bold=True, color=C_WHITE)
+         _T_Y += _CAT_H
+
+         for _ins in _citems[:_cmax]:
+             if _T_Y + _ROW_H > _T_YMAX:
+                 break
+
+             _ins_title  = plain_text(_ins.get("title",  ""), 90)
+             _ins_body   = plain_text(_ins.get("text",   ""), 210)
+             _ins_action = plain_text(_ins.get("action", ""), 240)
+
+             # Row background (full width)
+             add_rect(slide, _T_LX, _T_Y, _T_W, _ROW_H, fill=C_SOFT_ROW)
+
+             # Thin vertical separator between columns
+             add_rect(slide, _RC_X - 0.05, _T_Y + 0.04, 0.02,
+                      _ROW_H - 0.08, fill=C_LIGHT_BLUE)
+
+             # Left column — title (bold) + body text
+             add_text(slide, _ins_title,
+                      _T_LX + 0.12, _T_Y + 0.04, _LC_W - 0.18, 0.18,
+                      size=7.5, bold=True, color=C_DEEP_NAVY, wrap=False)
+             add_text(slide, _ins_body,
+                      _T_LX + 0.12, _T_Y + 0.24, _LC_W - 0.18, _ROW_H - 0.28,
+                      size=6.5, color=C_DARK_NAVY, wrap=True)
+
+             # Right column — recommended action
+             add_text(slide, _ins_action,
+                      _RC_X + 0.10, _T_Y + 0.04, _RC_W - 0.14, _ROW_H - 0.08,
+                      size=6.5, color=C_DARK_NAVY, wrap=True)
+
+             _T_Y += _ROW_H + _ROW_G
 
 
     if _closing:
@@ -4408,10 +4464,10 @@ def compute_metrics(df, question_cols, fav_t, unfav_t, scale):
             favorable   = (series >= fav_t).sum()
             unfavorable = (series <= unfav_t).sum()
             neutral     = responses - favorable - unfavorable
-            fav_pct     = round(favorable   / responses * 100, 1)
-            unfav_pct   = round(unfavorable / responses * 100, 1)
-            neut_pct    = round(neutral     / responses * 100, 1)
-            score_norm  = round((mean_val - 1) / (max_score - 1) * 100, 1)
+            fav_pct     = round(favorable   / responses * 100)
+            unfav_pct   = round(unfavorable / responses * 100)
+            neut_pct    = round(neutral     / responses * 100)
+            score_norm  = round((mean_val - 1) / (max_score - 1) * 100)
             value_counts= series.value_counts().reindex([1, 2, 3, 4, 5], fill_value=0)
             nps_score   = None
         else:
@@ -4419,11 +4475,11 @@ def compute_metrics(df, question_cols, fav_t, unfav_t, scale):
             promoters   = (series >= 9).sum()
             detractors  = (series <= 6).sum()
             passives    = responses - promoters - detractors
-            fav_pct     = round(promoters  / responses * 100, 1)
-            unfav_pct   = round(detractors / responses * 100, 1)
-            neut_pct    = round(passives   / responses * 100, 1)
-            score_norm  = round(mean_val   / max_score * 100, 1)
-            nps_score   = round(fav_pct - unfav_pct, 1)
+            fav_pct     = round(promoters  / responses * 100)
+            unfav_pct   = round(detractors / responses * 100)
+            neut_pct    = round(passives   / responses * 100)
+            score_norm  = round(mean_val   / max_score * 100)
+            nps_score   = round(fav_pct - unfav_pct)
             value_counts= series.value_counts().reindex(range(0, 11), fill_value=0)
         per_question[col] = {
             "responses": responses, "mean": round(mean_val, 2), "median": round(median_val, 2),
@@ -4434,8 +4490,8 @@ def compute_metrics(df, question_cols, fav_t, unfav_t, scale):
     metrics["per_question"] = per_question
     if per_question:
         metrics["overall_mean"]       = round(np.mean([v["mean"]       for v in per_question.values()]), 2)
-        metrics["overall_score_norm"] = round(np.mean([v["score_norm"] for v in per_question.values()]), 1)
-        metrics["overall_fav_pct"]    = round(np.mean([v["fav_pct"]    for v in per_question.values()]), 1)
+        metrics["overall_score_norm"] = round(np.mean([v["score_norm"] for v in per_question.values()]))
+        metrics["overall_fav_pct"]    = round(np.mean([v["fav_pct"]    for v in per_question.values()]))
         sorted_q = sorted(per_question.items(), key=lambda x: x[1]["mean"], reverse=True)
         metrics["top_questions"]         = sorted_q[:3]
         metrics["bottom_questions"]      = sorted_q[-3:]
@@ -5100,6 +5156,9 @@ if selected_view == "Consolidated View":
 
     if _all_cp_frames:
         _cp_tidy = pd.concat(_all_cp_frames, ignore_index=True)
+        # Normalise question text so whitespace variants from different EGIs
+        # collapse to the same group key (prevents duplicate Q06 expanders).
+        _cp_tidy["Question"] = _cp_tidy["Question"].str.strip()
         _cp_sm   = build_score_map(_cp_tidy)
         _cp_zm   = compute_zoom_metrics(_cp_tidy, _cp_sm)
         _cp_pq   = _cp_zm.get("per_question", {})
@@ -5118,11 +5177,11 @@ if selected_view == "Consolidated View":
         _q01k_cp = next(
             (q for q in _cp_pq if re.search(r"(satisf|overall)", q, re.I)), None
         )
-        _q01v_cp = f"{round(_cp_pq[_q01k_cp]['fav_pct'], 1)}%" if _q01k_cp else "N/A"
+        _q01v_cp = f"{round(_cp_pq[_q01k_cp]['fav_pct'])}%" if _q01k_cp else "N/A"
         _q03k_cp = next(
-            (q for q in _cp_pq if re.search(r"(likely|implement|apply)", q, re.I)), None
+            (q for q in _cp_pq if re.search(r"(likely|implement|q03)", q, re.I)), None
         )
-        _q03v_cp = f"{round(_cp_pq[_q03k_cp]['fav_pct'], 1)}%" if _q03k_cp else "N/A"
+        _q03v_cp = f"{round(_cp_pq[_q03k_cp]['fav_pct'])}%" if _q03k_cp else "N/A"
 
         st.markdown(
             '<div class="section-title">Closing Poll — Consolidated View</div>',
@@ -5190,7 +5249,7 @@ if selected_view == "Consolidated View":
                             int(_cpd_agg.loc[_cpd_agg["Answer"] == _cpd_ans, "Count"].sum())
                             if not _cpd_agg.empty else 0
                         )
-                        _cpd_pct  = round(_cpd_cnt / _cpd_total * 100, 1) if _cpd_total > 0 else 0.0
+                        _cpd_pct  = round(_cpd_cnt / _cpd_total * 100) if _cpd_total > 0 else 0
                         _cpd_tier = (
                             "Positive" if _cpd_sc >= 4
                             else "Neutral" if _cpd_sc == 3
@@ -5388,10 +5447,26 @@ if selected_view == "Consolidated View":
                 )
 
         # ── Participant Comments — consolidated Q06 ───────────────────────
-        _cp_freetext_qs = [
-            q for q, grp in _cp_tidy.groupby("Question", sort=False)
-            if _is_freetext_question(grp)
-        ]
+        # Build deduplicated free-text list.  Normalise each question label
+        # (collapse all internal whitespace) before grouping to prevent the
+        # same question from appearing as two separate expanders when EGI
+        # exports differ by invisible whitespace characters.
+        _ft_seen   = {}   # normalised_key → canonical question text (first seen)
+        _ft_frames = {}   # canonical text  → list[DataFrame] to merge
+
+        for _ftq_raw, _ftg_raw in _cp_tidy.groupby("Question", sort=False):
+            if not _is_freetext_question(_ftg_raw):
+                continue
+            _ftq_norm = " ".join(str(_ftq_raw).split())   # collapse ALL whitespace
+            if _ftq_norm not in _ft_seen:
+                _ft_seen[_ftq_norm]        = _ftq_raw
+                _ft_frames[_ftq_raw]       = [_ftg_raw[["Answer", "Count"]].copy()]
+            else:
+                _canon = _ft_seen[_ftq_norm]
+                _ft_frames[_canon].append(_ftg_raw[["Answer", "Count"]].copy())
+
+        _cp_freetext_qs = list(_ft_frames.keys())   # deduplicated canonical labels
+
         if _cp_freetext_qs:
             import html as _html_mod
             st.markdown(
@@ -5403,8 +5478,13 @@ if selected_view == "Consolidated View":
                 "Instructor names have been replaced with [Name]."
             )
             for _cp_ft_q in _cp_freetext_qs:
+                # Merge all frames for this canonical question, then sum counts
+                # for identical answers (covers the whitespace-duplicate case).
+                _cp_ft_merged = pd.concat(_ft_frames[_cp_ft_q], ignore_index=True)
                 _cp_ft_resp = (
-                    _cp_tidy[_cp_tidy["Question"] == _cp_ft_q][["Answer", "Count"]]
+                    _cp_ft_merged
+                    .groupby("Answer", sort=False)["Count"].sum()
+                    .reset_index()
                     .assign(_len=lambda d: d["Answer"].str.len())
                     .sort_values(["Count", "_len"], ascending=[False, False])
                     .drop(columns="_len")
@@ -5560,8 +5640,8 @@ if selected_view == "Consolidated View":
                 q03k = next(
                     (q for q in pq_p if re.search(r"(likely|implement|q03)", q, re.I)), None
                 )
-                sat = round(pq_p[q01k]["fav_pct"], 1) if q01k else None
-                act = round(pq_p[q03k]["fav_pct"], 1) if q03k else None
+                sat = round(pq_p[q01k]["fav_pct"]) if q01k else None
+                act = round(pq_p[q03k]["fav_pct"]) if q03k else None
                 return {
                     "overall":      overall,
                     "satisfaction": sat,
@@ -5638,7 +5718,7 @@ if selected_view == "Consolidated View":
                     if _pcv_two:
                         _a, _b = _pcv_vals[0], _pcv_vals[1]
                         if _a is not None and _b is not None:
-                            _d = round(_b - _a, 1)
+                            _d = round(_b - _a)
                             if _d == 0:
                                 _ds, _dc = "no change", SAP_GRAY_MED
                             else:
@@ -5691,6 +5771,7 @@ if selected_view == "Consolidated View":
             _cp_pptx_bytes = generate_pptx_bytes(
                 _cp_tidy, _cp_zm, _cp_sm,
                 egi_name="Consolidated — All EGIs",
+                n_egis=_n_egis_cp,
             )
         st.download_button(
             label="Download Consolidated Closing Poll Report (.pptx)",
@@ -5923,7 +6004,7 @@ if not is_closing_view:
                 continue
             for _, _dr in _dq_agg.sort_values("Count", ascending=False).iterrows():
                 _dc  = int(_dr["Count"])
-                _dpct = round(_dc / _dq_total * 100, 1) if _dq_total > 0 else 0.0
+                _dpct = round(_dc / _dq_total * 100) if _dq_total > 0 else 0
                 _dist_rows.append({
                     "Question": _dq,
                     "Answer"  : str(_dr["Answer"]),
@@ -5987,7 +6068,7 @@ if is_closing_view:
             sorted_answers = sorted(ans_map.items(), key=lambda x: x[1], reverse=True)
             for ans, sc in sorted_answers:
                 cnt  = int(agg.loc[agg["Answer"] == ans, "Count"].sum()) if not agg.empty else 0
-                pct  = round(cnt / total * 100, 1) if total > 0 else 0.0
+                pct  = round(cnt / total * 100) if total > 0 else 0
                 tier = ("Positive" if sc >= 4 else "Neutral" if sc == 3 else "Negative")
                 dist_rows.append({
                     "Question" : q,
