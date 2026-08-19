@@ -1664,7 +1664,32 @@ def parse_zoom_polling(df_raw: pd.DataFrame) -> pd.DataFrame:
     df.columns = [str(c).strip() for c in df.columns]
     if str(df.iloc[0, 0]).strip().lower() == "class":
         df = df.iloc[1:].reset_index(drop=True)
-    df.columns = ["Class", "Start Date", "Poll", "Question", "Answer", "Count", "Percentage"]
+
+    # ── Column normalisation ────────────────────────────────────────────────
+    # Zoom polling exports come in two layouts:
+    #   7-col: Class | Start Date | Poll | Question | Answer | Count | Percentage
+    #   6-col: Class | Start Date |      | Question | Answer | Count | Percentage
+    #          (no Poll column — older / trimmed exports)
+    # We detect by column count AND by scanning for a "poll"-named column.
+    _ncols    = len(df.columns)
+    _cols_lc  = [c.lower() for c in df.columns]
+    _has_poll = any("poll" in c for c in _cols_lc)
+
+    if _ncols == 7 or _has_poll:
+        # Standard 7-column format (or any file that has a Poll-named column)
+        df.columns = ["Class", "Start Date", "Poll", "Question", "Answer", "Count", "Percentage"]
+    elif _ncols == 6:
+        # 6-column format without a Poll column — synthesise a default value
+        df.columns = ["Class", "Start Date", "Question", "Answer", "Count", "Percentage"]
+        df.insert(2, "Poll", "(No poll name)")
+    else:
+        # Unexpected layout — force to 7 columns by position (may scramble data,
+        # but avoids a hard crash; downstream validation will handle bad rows)
+        _target = ["Class", "Start Date", "Poll", "Question", "Answer", "Count", "Percentage"]
+        df = df.iloc[:, :7]            # keep at most 7 columns
+        df.columns = _target[:len(df.columns)]
+        if "Poll" not in df.columns:
+            df.insert(2, "Poll", "(No poll name)")
 
     df["Class"]      = df["Class"].ffill()
     df["Start Date"] = df["Start Date"].ffill()
@@ -4776,8 +4801,34 @@ for f in uploaded_files:
         continue
 
     if is_zoom_polling_format(df_check):
-        tidy_raw = parse_zoom_polling(df_check)
-        tidy, anon_qs = anonymize_tidy(tidy_raw)
+        try:
+            tidy_raw = parse_zoom_polling(df_check)
+        except Exception as _parse_err:
+            errors.append(
+                f"'{f.name}' could not be parsed — unexpected format: {_parse_err}"
+            )
+            continue
+
+        # ── Unnamed-poll guard ────────────────────────────────────────────
+        # parse_zoom_polling already filters out rows whose poll name is blank
+        # or invalid (_is_valid_poll).  If the result is empty it means every
+        # poll in this file was unnamed — surface a clear message instead of
+        # letting downstream code crash.
+        if tidy_raw.empty:
+            errors.append(
+                f"'{f.name}' — all polls in this file are unnamed and have been "
+                f"excluded from the analysis."
+            )
+            continue
+
+        try:
+            tidy, anon_qs = anonymize_tidy(tidy_raw)
+        except Exception as _anon_err:
+            errors.append(
+                f"'{f.name}' could not be anonymised — {_anon_err}"
+            )
+            continue
+
         zoom_files[f.name] = {
             "tidy"        : tidy,
             "item_id"     : item_id,
@@ -4791,7 +4842,6 @@ for err in errors:
     st.warning(err)
 
 if not zoom_files:
-    st.error("No valid Zoom Polling Reports found. Please upload files in the expected format.")
     st.stop()
 
 st.info(
@@ -5797,6 +5847,14 @@ if selected_view == "Consolidated View":
 _sel_data      = display_map[selected_view]
 tidy_all       = _sel_data["tidy"]
 current_egi    = selected_view        # human-readable EGI name for this view
+
+# ── Defensive guard: ensure Poll column is always present ─────────────────
+# In rare cases (e.g., older 6-column Zoom exports processed by a prior
+# code version) the tidy DataFrame may be missing the Poll column.
+# Reconstruct it here so downstream code never crashes with KeyError.
+if "Poll" not in tidy_all.columns:
+    tidy_all = tidy_all.copy()
+    tidy_all["Poll"] = "(No poll name)"
 
 all_polls   = sorted(tidy_all["Poll"].unique().tolist())
 all_classes = sorted(tidy_all["Class"].unique().tolist())
