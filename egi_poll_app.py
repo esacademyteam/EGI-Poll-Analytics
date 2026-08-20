@@ -1568,7 +1568,7 @@ st.markdown(f"""
   {_LOGO_TAG}
   <div>
     <h1>EGI Poll Analytics</h1>
-    <p>Zoom Polling Report analysis — metrics, insights and export for Portfolio Managers</p>
+    <p>Zoom Polling Report analysis — metrics, insights and export</p>
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -1719,8 +1719,14 @@ def parse_zoom_polling(df_raw: pd.DataFrame) -> pd.DataFrame:
     df["Answer"]     = df["Answer"].str.strip()
     df["Poll"]       = df["Poll"].str.strip()
     # ── Drop unnamed / invalid polls ──────────────────────────────────────────
+    # Track whether any unnamed polls existed before filtering so callers can
+    # surface that information in the UI exclusion message.
+    _had_unnamed = bool((~df["Poll"].apply(_is_valid_poll)).any())
     df = df[df["Poll"].apply(_is_valid_poll)].reset_index(drop=True)
-    return df[["Class", "Start Date", "Poll", "Question", "Answer", "Count", "Percentage"]].reset_index(drop=True)
+    return (
+        df[["Class", "Start Date", "Poll", "Question", "Answer", "Count", "Percentage"]].reset_index(drop=True),
+        _had_unnamed,
+    )
 
 
 def build_score_map(tidy: pd.DataFrame) -> dict:
@@ -2543,14 +2549,29 @@ def _is_freetext_question(grp: pd.DataFrame) -> bool:
 
     Secondary signal: extremely long average answer length (> 60 chars) that
     cannot plausibly be a pre-defined option.
+
+    Length guard on the primary signal: multiple-choice questions with very few
+    respondents can also have all-Count-1 rows (each person picks a different
+    option).  Scale-word answers like "Very Valuable" or "Moderately Valuable"
+    average ~15 chars.  Free-text sentences average 25+ chars and at least one
+    response is typically > 50 chars.  Both thresholds must be exceeded before
+    the question is treated as free text.
     """
     n_rows         = len(grp)
     count_one_frac = (grp["Count"] == 1).sum() / max(n_rows, 1)
     unique         = grp["Answer"].nunique()
     avg_len        = grp["Answer"].str.len().mean()
+    max_len        = grp["Answer"].str.len().max()
 
-    is_mostly_unique = (count_one_frac > 0.70) and (unique > 2)
-    is_very_long     = avg_len > 60
+    # Primary: mostly unique answers AND substantive length
+    # (avg > 25 chars OR at least one answer > 50 chars)
+    is_mostly_unique = (
+        (count_one_frac > 0.70)
+        and (unique > 2)
+        and (avg_len > 25 or max_len > 50)
+    )
+    # Fall-back: very long average regardless of count distribution
+    is_very_long = avg_len > 60
     return is_mostly_unique or is_very_long
 
 
@@ -4775,8 +4796,9 @@ if not uploaded_files:
 # ─────────────────────────────────────────────
 # Load and process all uploaded files
 # ─────────────────────────────────────────────
-zoom_files = {}   # {filename → {"tidy": df, "item_id": str, "anon_qs": list, "default_name": str}}
-errors     = []
+zoom_files     = {}   # {filename → {"tidy": df, "item_id": str, "anon_qs": list, "default_name": str}}
+errors         = []
+_unnamed_warns = []   # files where all polls were unnamed — rendered with styled box
 
 for f in uploaded_files:
     item_id      = extract_learning_hub_id(f.name)
@@ -4802,7 +4824,7 @@ for f in uploaded_files:
 
     if is_zoom_polling_format(df_check):
         try:
-            tidy_raw = parse_zoom_polling(df_check)
+            tidy_raw, _had_unnamed = parse_zoom_polling(df_check)
         except Exception as _parse_err:
             errors.append(
                 f"'{f.name}' could not be parsed — unexpected format: {_parse_err}"
@@ -4815,10 +4837,7 @@ for f in uploaded_files:
         # poll in this file was unnamed — surface a clear message instead of
         # letting downstream code crash.
         if tidy_raw.empty:
-            errors.append(
-                f"'{f.name}' — all polls in this file are unnamed and have been "
-                f"excluded from the analysis."
-            )
+            _unnamed_warns.append(f.name)
             continue
 
         try:
@@ -4830,16 +4849,28 @@ for f in uploaded_files:
             continue
 
         zoom_files[f.name] = {
-            "tidy"        : tidy,
-            "item_id"     : item_id,
-            "anon_qs"     : anon_qs,
-            "default_name": default_name,
+            "tidy"             : tidy,
+            "item_id"          : item_id,
+            "anon_qs"          : anon_qs,
+            "default_name"     : default_name,
+            "had_unnamed_polls": _had_unnamed,
         }
     else:
         errors.append(f"'{f.name}' is not a recognised Zoom Polling Report format.")
 
 for err in errors:
     st.warning(err)
+
+for _uw in _unnamed_warns:
+    st.markdown(
+        f'<div style="margin-top:4px;padding:8px 12px;background:#FFF8E1;'
+        f'border-left:3px solid #F39C12;border-radius:4px;'
+        f'font-size:0.78rem;color:#7D5C00;">'
+        f"<strong>'{_uw}'</strong> — all polls in this file are unnamed and have been "
+        f"excluded from the analysis."
+        f'</div>',
+        unsafe_allow_html=True,
+    )
 
 if not zoom_files:
     st.stop()
@@ -4915,9 +4946,10 @@ for fname, data in zoom_files.items():
     egi_key  = f"egi_{fname}"
     egi_name = st.session_state.get(egi_key, data["default_name"])
     display_map[egi_name] = {
-        "tidy"    : data["tidy"],
-        "fname"   : fname,
-        "anon_qs" : data["anon_qs"],
+        "tidy"             : data["tidy"],
+        "fname"            : fname,
+        "anon_qs"          : data["anon_qs"],
+        "had_unnamed_polls": data.get("had_unnamed_polls", False),
     }
 
 # ─────────────────────────────────────────────
@@ -5178,8 +5210,14 @@ if selected_view == "Consolidated View":
 
         with st.expander("EGI Summary by Poll Type", expanded=True):
             st.markdown(_tbl_html, unsafe_allow_html=True)
-            if _cons_excl_polls:
-                _excl_list = ", ".join(sorted(_cons_excl_polls))
+            _cons_had_unnamed = any(
+                d.get("had_unnamed_polls", False) for d in display_map.values()
+            )
+            if _cons_excl_polls or _cons_had_unnamed:
+                _excl_parts = list(sorted(_cons_excl_polls))
+                if _cons_had_unnamed:
+                    _excl_parts.append("unnamed polls")
+                _excl_list = ", ".join(_excl_parts)
                 st.markdown(
                     f'<div style="margin-top:12px;padding:8px 12px;background:#FFF8E1;'
                     f'border-left:3px solid #F39C12;border-radius:4px;'
@@ -5886,8 +5924,11 @@ for _pt in all_polls:
     })
 if _egi_pt_rows:
     st.dataframe(pd.DataFrame(_egi_pt_rows), use_container_width=True, hide_index=True)
-if _egi_excl_polls:
-    _excl_str = ", ".join(_egi_excl_polls)
+if _egi_excl_polls or _sel_data.get("had_unnamed_polls", False):
+    _excl_parts = list(_egi_excl_polls)
+    if _sel_data.get("had_unnamed_polls", False):
+        _excl_parts.append("unnamed polls")
+    _excl_str = ", ".join(_excl_parts)
     st.markdown(
         f'<div style="margin-top:8px;padding:8px 12px;background:#FFF8E1;'
         f'border-left:3px solid #F39C12;border-radius:4px;'
