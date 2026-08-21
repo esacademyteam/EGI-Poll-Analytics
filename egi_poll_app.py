@@ -2505,6 +2505,21 @@ _LEAD_PERSON_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Pattern: "Name [teaching / facilitation verb] ..."
+# Catches "Bernice explains the complex concepts", "John covered the topic", etc.
+# Requires at least one lowercase letter after the first capital to exclude
+# acronyms and all-caps abbreviations (SAP, S/4, etc.).
+# Words in _NON_NAME_VOCAB are filtered out in the replacement function.
+_NAME_TEACHES_RE = re.compile(
+    r'\b([A-Z][a-z][a-zA-Z]{1,18})\s+'
+    r'(?:explains?|explained|facilitat(?:es?|ed|ing)|presents?|presented|'
+    r'covers?|covered|teaches?|taught|deliver(?:s|ed|ing)|'
+    r'walk(?:s|ed|ing)\s+(?:us|through)|guided?|'
+    r'shared?|discuss(?:es|ed)|reviewed?|showed?|led\b)',
+    # No re.IGNORECASE — Title-Case first letter is the key signal for a name;
+    # common words like "for", "the", "and" are all lowercase and will not match.
+)
+
 # Pattern: "Thank you to Name", "Thanks Name", "Thank you Name Surname", etc.
 # Catches names that follow gratitude expressions — common vector for leaking names.
 _THANK_RE = re.compile(
@@ -2609,13 +2624,21 @@ def _redact_names_in_text(text: str, known_names: frozenset = frozenset()) -> tu
     new_text = _THANK_RE.sub(_replace_thank, new_text)
 
     # Redact names in sentences like "Syrus is one of the best instructors."
-    # Only fires when the same sentence contains an instructor-evaluation keyword.
     def _replace_lead(m: re.Match) -> str:
         word = m.group(1)
         if word.lower() not in _NON_NAME_VOCAB:
             return "[Name]"
         return m.group(0)
     new_text = _LEAD_PERSON_RE.sub(_replace_lead, new_text)
+
+    # Redact names followed by a teaching/facilitation verb:
+    # "Bernice explains...", "John covered...", "Sarah facilitated..."
+    def _replace_teaches(m: re.Match) -> str:
+        word = m.group(1)
+        if word.lower() not in _NON_NAME_VOCAB:
+            return m.group(0).replace(word, "[Person Name]", 1)
+        return m.group(0)
+    new_text = _NAME_TEACHES_RE.sub(_replace_teaches, new_text)
 
     # Redact known instructor/person names (longest first to avoid partial overlap)
     for _kn in sorted(known_names, key=len, reverse=True):
@@ -2628,19 +2651,275 @@ def _redact_names_in_text(text: str, known_names: frozenset = frozenset()) -> tu
     return new_text, (new_text != text)
 
 
+# ── spaCy NER — personal name anonymisation ────────────────────────────────
+
+@st.cache_resource(show_spinner=False)
+def _load_spacy_nlp():
+    """
+    Load spaCy en_core_web_sm for NER-based PERSON detection.
+    Cached per session so the model is loaded only once.
+    Returns None if spaCy or the model is unavailable — the app then falls
+    back to the existing regex-based redaction without crashing.
+    """
+    try:
+        import spacy                                    # noqa: PLC0415
+        # Exclude pipeline components not needed for NER — faster and lighter
+        nlp = spacy.load(
+            "en_core_web_sm",
+            exclude=["tagger", "parser", "senter", "attribute_ruler", "lemmatizer"],
+        )
+        return nlp
+    except Exception:
+        return None
+
+
+def _ner_redact_persons(text: str, nlp) -> tuple:
+    """
+    Replace every PERSON entity detected by spaCy NER with [Person Name].
+
+    Only PERSON labels are replaced.  All other entity types (ORG, PRODUCT,
+    GPE, etc.) are left untouched so SAP product names, solutions, and
+    business terms are never affected.
+
+    Returns (redacted_text, was_changed).
+    """
+    if nlp is None or not text or not text.strip():
+        return text, False
+    doc  = nlp(text)
+    ents = [(e.start_char, e.end_char) for e in doc.ents if e.label_ == "PERSON"]
+    if not ents:
+        return text, False
+    # Replace from end → start so earlier character offsets stay valid
+    result = text
+    for start, end in sorted(ents, reverse=True):
+        result = result[:start] + "[Person Name]" + result[end:]
+    return result, True
+
+
+# ── NLTK NER — zero-dependency fallback ────────────────────────────────────
+
+@st.cache_resource(show_spinner=False)
+def _load_nltk_ner():
+    """
+    Download the NLTK data packages needed for NE chunking and return True.
+    NLTK is pre-installed on Streamlit Cloud — no requirements.txt change needed.
+    Returns False if anything fails so callers degrade gracefully.
+    """
+    try:
+        import nltk                                     # noqa: PLC0415
+        for _pkg in [
+            "punkt", "punkt_tab",
+            "averaged_perceptron_tagger", "averaged_perceptron_tagger_eng",
+            "maxent_ne_chunker", "maxent_ne_chunker_tab",
+            "words",
+        ]:
+            try:
+                nltk.download(_pkg, quiet=True)
+            except Exception:
+                pass
+        return True
+    except Exception:
+        return False
+
+
+def _nltk_redact_persons(text: str, nltk_ready: bool) -> tuple:
+    """
+    Use NLTK's NE chunker to detect PERSON entities and replace with
+    [Person Name].  Handles both single first names ("Bernice explains...")
+    and full names ("John Smith covered...").
+    Returns (redacted_text, was_changed).
+    """
+    if not nltk_ready or not text or not text.strip():
+        return text, False
+    try:
+        import nltk                                     # noqa: PLC0415
+        from nltk import word_tokenize, pos_tag, ne_chunk   # noqa: PLC0415
+        from nltk.tree import Tree                      # noqa: PLC0415
+
+        tokens  = word_tokenize(text)
+        tagged  = pos_tag(tokens)
+        chunked = ne_chunk(tagged, binary=False)
+
+        persons = []
+        for subtree in chunked:
+            if isinstance(subtree, Tree) and subtree.label() == "PERSON":
+                name = " ".join(w for w, _ in subtree.leaves())
+                if name.lower() not in _NON_NAME_VOCAB:
+                    persons.append(name)
+
+        if not persons:
+            return text, False
+
+        result = text
+        for name in sorted(persons, key=len, reverse=True):
+            result = re.sub(
+                r"(?<!\w)" + re.escape(name) + r"(?!\w)",
+                "[Person Name]", result,
+            )
+        return result, result != text
+    except Exception:
+        return text, False
+
+
+# ── Common first-names lookup (v132) ───────────────────────────────────────
+# Catches plain first names in evaluative sentences such as "John was great"
+# or "Maria was very helpful" that NER models (spaCy sm, NLTK) routinely miss
+# because there is not enough surrounding context in short survey responses.
+#
+# Coverage: top US male/female names, common names in global SAP deployments
+# (Indian, German, Spanish/Latin-American, French, Eastern-European, Irish).
+# ~600 entries — lightweight, zero dependencies, works on day one.
+_COMMON_FIRST_NAMES: frozenset = frozenset({
+    # ── Top US male names ───────────────────────────────────────────────────
+    "Aaron", "Abraham", "Adam", "Adrian", "Alan", "Albert", "Alex",
+    "Alexander", "Alfred", "Allen", "Andrew", "Anthony", "Arthur",
+    "Austin", "Benjamin", "Billy", "Bobby", "Bradley", "Brandon",
+    "Brian", "Bruce", "Bryan", "Carl", "Carlos", "Charles",
+    "Christopher", "Clarence", "Craig", "Curtis", "Dale", "Daniel",
+    "David", "Dennis", "Derek", "Donald", "Douglas", "Dylan",
+    "Earl", "Eddie", "Edward", "Eric", "Eugene", "Frank",
+    "Fred", "Frederick", "Gary", "George", "Gerald", "Gordon",
+    "Gregory", "Harold", "Harry", "Henry", "Howard", "Ivan",
+    "Jack", "Jacob", "James", "Jason", "Jeffrey", "Jeremy",
+    "Jesse", "Joel", "Johnny", "Jonathan", "Jordan", "Jose",
+    "Joseph", "Joshua", "Juan", "Justin", "Keith", "Kenneth",
+    "Kevin", "Kyle", "Larry", "Lawrence", "Leonard", "Logan",
+    "Louis", "Luke", "Mario", "Matthew", "Michael", "Nathan",
+    "Nicholas", "Patrick", "Paul", "Peter", "Philip", "Ralph",
+    "Randy", "Raymond", "Richard", "Robert", "Roger", "Ronald",
+    "Roy", "Russell", "Ryan", "Samuel", "Scott", "Sean",
+    "Simon", "Stephen", "Steven", "Terry", "Thomas", "Timothy",
+    "Todd", "Tony", "Tyler", "Victor", "Vincent", "Walter",
+    "Wayne", "William", "Willie", "Zachary",
+    # ── Top US female names ─────────────────────────────────────────────────
+    "Alice", "Amanda", "Amber", "Amy", "Andrea", "Angela",
+    "Ann", "Anna", "Annette", "Ashley", "Barbara", "Betty",
+    "Beverly", "Bonnie", "Brenda", "Brittany", "Carol",
+    "Caroline", "Catherine", "Cheryl", "Christina", "Christine",
+    "Cindy", "Cynthia", "Dana", "Danielle", "Deborah", "Debra",
+    "Diana", "Diane", "Donna", "Dorothy", "Elizabeth", "Emily",
+    "Emma", "Erica", "Evelyn", "Frances", "Gloria", "Hannah",
+    "Heather", "Helen", "Isabella", "Jacqueline", "Janet",
+    "Janice", "Jean", "Jennifer", "Jessica", "Joan", "Joyce",
+    "Judith", "Judy", "Julia", "Julie", "Karen", "Kathleen",
+    "Kathryn", "Kayla", "Kelly", "Kimberly", "Laura", "Lauren",
+    "Linda", "Lisa", "Lori", "Madison", "Margaret", "Maria",
+    "Marilyn", "Martha", "Mary", "Megan", "Melissa", "Michelle",
+    "Mia", "Monica", "Nancy", "Natalie", "Nicole", "Pamela",
+    "Patricia", "Rachel", "Rebecca", "Ruth", "Sandra", "Sara",
+    "Sarah", "Sharon", "Shirley", "Sophia", "Stephanie",
+    "Susan", "Teresa", "Theresa", "Tiffany", "Tracy", "Valerie",
+    "Vanessa", "Victoria", "Virginia", "Wendy", "Whitney",
+    "Yvonne", "Zoe",
+    # ── Indian names (common in SAP/global corporate) ───────────────────────
+    "Abhishek", "Aditya", "Ajay", "Anil", "Anita", "Anjali",
+    "Arjun", "Asha", "Deepak", "Divya", "Ganesh", "Geeta",
+    "Harish", "Kavya", "Kiran", "Mahesh", "Manish", "Meena",
+    "Mohan", "Mukesh", "Naresh", "Neha", "Nikhil", "Nisha",
+    "Pooja", "Priya", "Rahul", "Raj", "Rajesh", "Rakesh",
+    "Ramesh", "Ravi", "Rekha", "Ritesh", "Rohan", "Sanjay",
+    "Seema", "Sunil", "Sunita", "Suresh", "Swati", "Usha",
+    "Varun", "Vijay", "Vivek", "Yogesh",
+    # ── German / Austrian / Swiss ───────────────────────────────────────────
+    "Anja", "Claudia", "Franz", "Hans", "Ingrid", "Klaus",
+    "Markus", "Matthias", "Petra", "Rolf", "Sabine", "Silke",
+    "Stefan", "Ursula",
+    # ── Spanish / Latin-American ────────────────────────────────────────────
+    "Alejandro", "Alberto", "Antonio", "Camila", "Carmen",
+    "Diego", "Eduardo", "Elena", "Fernanda", "Fernando",
+    "Gabriela", "Isabel", "Jorge", "Leonardo", "Lucia",
+    "Luis", "Manuel", "Mariana", "Miguel", "Natalia",
+    "Oscar", "Pablo", "Pedro", "Rafael", "Ricardo",
+    "Roberto", "Rosa", "Sergio", "Sofia", "Valentina", "Valeria",
+    # ── French ──────────────────────────────────────────────────────────────
+    "Luc", "Marc", "Nathalie", "Pierre", "Thierry", "Yves",
+    # ── Eastern-European ────────────────────────────────────────────────────
+    "Andrei", "Dmitri", "Katja", "Natasha", "Olga", "Pavel",
+    "Sergei", "Tatiana",
+    # ── Irish / Celtic ──────────────────────────────────────────────────────
+    "Bernadette", "Bernice", "Bernard", "Brendan", "Bridget",
+    "Colm", "Conor", "Declan", "Eoin", "Fiona", "Liam",
+    "Niall", "Nora", "Roisin",
+    # ── Common short forms / nicknames ──────────────────────────────────────
+    "Beth", "Chris", "Dan", "Dave", "Jim", "Ken",
+    "Kim", "Liz", "Matt", "Mike", "Tim", "Tom",
+})
+
+# Names that also function as common English words.
+# These are skipped to avoid false positives at sentence boundaries
+# (e.g. "Will the training...", "Grace period...", "Bill of materials...").
+_AMBIGUOUS_NAMES: frozenset = frozenset({
+    "will",   # auxiliary verb
+    "grace",  # "grace period" — relevant in SAP/finance text
+    "bill",   # invoice / financial document
+    "mark",   # verb "to mark"
+    "faith",  # abstract noun
+    "hope",   # verb/noun "I hope..."
+    "joy",    # abstract noun
+    "rose",   # past tense "rise" / flower
+    "gene",   # biology / genetics term
+    "dean",   # academic title
+    "lance",  # weapon
+    "wade",   # verb "to wade"
+    "sue",    # verb "to sue"
+})
+
+
+def _nameslist_redact_persons(text: str) -> tuple:
+    """
+    Scan every Title-Cased word token in *text*.  If the word appears in
+    _COMMON_FIRST_NAMES and is NOT in _AMBIGUOUS_NAMES or _NON_NAME_VOCAB,
+    replace it with [Person Name].
+
+    This catches the gap that NER models cannot reliably fill: plain first
+    names in short evaluative sentences — "John was great", "Maria was very
+    helpful", "I learned a lot from Alex today" — where there is too little
+    context for a statistical model to fire.
+
+    Tokens that were already replaced by earlier steps ("[Person Name]",
+    "[Name]") are left untouched because they contain brackets and will not
+    match \b[A-Za-z]+\b.
+
+    Returns (redacted_text, was_changed).
+    """
+    def _replace(m: re.Match) -> str:
+        word = m.group(0)
+        if (
+            word[0].isupper()                    # must be Title-Cased
+            and word in _COMMON_FIRST_NAMES      # must be a known first name
+            and word.lower() not in _AMBIGUOUS_NAMES
+            and word.lower() not in _NON_NAME_VOCAB
+        ):
+            return "[Person Name]"
+        return word
+
+    result = re.sub(r'\b[A-Za-z]{2,}\b', _replace, text)
+    return result, result != text
+
+
 def anonymize_tidy(tidy: pd.DataFrame) -> tuple:
     """
-    Two-pass anonymisation:
+    Four-pass anonymisation:
 
     Pass 1 — Name questions: questions whose entire answer set looks like a
     list of person names (e.g. "Instructor Name").  Every name-like answer is
-    replaced with [Name] and counts are aggregated.  Individual name words are
-    collected into *known_names* for use in Pass 2.
+    replaced with [Name] and individual name words are collected into
+    *known_names* for use in Pass 2.
 
-    Pass 2 — Free-text questions: ONLY honorific patterns (Mr./Dr./Prof. etc.)
-    and known instructor names (from Pass 1) are redacted.  The general
-    Title-Case regex is NOT applied so that product names, solution names and
-    system names are preserved.
+    Pass 2 — Free-text questions (four steps):
+      Step A — spaCy NER: every PERSON entity is replaced with [Person Name].
+               Only the PERSON label is targeted; SAP product names, ORG,
+               GPE, and other entity types are never touched.
+               Skipped gracefully if the model is not yet deployed.
+      Step B — NLTK NE chunker: fallback NER using NLTK's MaxEnt chunker.
+               Pre-installed on Streamlit Cloud; no requirements.txt change.
+      Step C — First-names list: scans every Title-Cased token against
+               ~600 common first names.  Catches "John was great" and
+               "Maria was very helpful" — patterns NER models miss in
+               short informal survey sentences.
+      Step D — Regex safety net: honorific patterns (Mr./Dr./Prof.),
+               teaching-verb patterns, lead-person patterns, and any
+               known instructor names propagated from Pass 1.
 
     Returns (anonymized_tidy, list_of_affected_question_texts).
     """
@@ -2677,14 +2956,23 @@ def anonymize_tidy(tidy: pd.DataFrame) -> tuple:
 
     _known_frozen = frozenset(known_names)
 
-    # ── Pass 2: conservative inline redaction for free-text ────────────────
+    # ── Pass 2: NER + names-list + regex for free-text ─────────────────────
+    _nlp        = _load_spacy_nlp()    # spaCy  — best accuracy, needs requirements.txt
+    _nltk_ready = _load_nltk_ner()     # NLTK   — pre-installed, no extra requirements
     for q in freetext_qs:
         grp = tidy[tidy["Question"] == q]
         changed_any = False
         for idx in grp.index:
             original = str(tidy.at[idx, "Answer"])
-            redacted, changed = _redact_names_in_text(original, _known_frozen)
-            if changed:
+            # Step A — spaCy NER (most accurate; skipped if model unavailable)
+            redacted, _chg_a = _ner_redact_persons(original, _nlp)
+            # Step B — NLTK NER fallback
+            redacted, _chg_b = _nltk_redact_persons(redacted, _nltk_ready)
+            # Step C — First-names list: catches "John was great" style sentences
+            redacted, _chg_c = _nameslist_redact_persons(redacted)
+            # Step D — Regex: honorifics + teaching verbs + known names
+            redacted, _chg_d = _redact_names_in_text(redacted, _known_frozen)
+            if _chg_a or _chg_b or _chg_c or _chg_d:
                 tidy.at[idx, "Answer"] = redacted
                 changed_any = True
         if changed_any and q not in affected:
